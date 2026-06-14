@@ -1,0 +1,1467 @@
+diff --git a/app.py b/app.py
+index eeed914..335ac22 100644
+--- a/app.py
++++ b/app.py
+@@ -9,64 +9,96 @@ from bs4 import BeautifulSoup
+ import requests
+ import whois
+ from datetime import datetime
+-import time
+ import urllib3
+ import os
+ import traceback
+-from multiprocessing import Process, Queue # For robust timeouts
+-
++from multiprocessing import Process, Queue
+ 
+ app = Flask(__name__)
+-
+-# --- Suppress InsecureRequestWarning ---
+-# This is often necessary as many sites, including some phishing sites,
+-# have improper SSL configurations.
+ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+ 
+-
+ # ----------------------------------------------------------------------------
+-# | MODEL LOADING
++# MODEL LOADING
+ # ----------------------------------------------------------------------------
+ try:
+     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+-
+-    # Build correct paths for model files
+     MODEL_PATH = os.path.join(BASE_DIR, "model", "Phishing_URL_detection.pkl")
+     FEATURES_PATH = os.path.join(BASE_DIR, "model", "feature_names.pkl")
+-
+-    # Load them safely
+     model = joblib.load(MODEL_PATH)
+     feature_names = joblib.load(FEATURES_PATH)
+     print(f"Model loaded successfully from: {MODEL_PATH}")
+-    # This feature order is CRITICAL and must match the order used during training.
+-    feature_names_order = [
+-        'UsingIP', 'LongURL', 'ShortURL', 'Symbol@', 'Redirecting//',
+-        'PrefixSuffix-', 'SubDomains', 'HTTPS', 'DomainRegLen', 'Favicon',
+-        'NonStdPort', 'HTTPSDomainURL', 'RequestURL', 'AnchorURL',
+-        'LinksInScriptTags', 'ServerFormHandler', 'InfoEmail', 'AbnormalURL',
+-        'WebsiteForwarding', 'StatusBarCust', 'DisableRightClick',
+-        'UsingPopupWindow', 'IframeRedirection', 'AgeofDomain',
+-        'DNSRecording', 'WebsiteTraffic', 'PageRank', 'GoogleIndex',
+-        'LinksPointingToPage', 'StatsReport'
+-    ]
+-    print(f"Model loaded successfully from: {MODEL_PATH}")
+ except Exception as e:
+-    print(f"--- FATAL: An error occurred during model loading: {e} ---")
++    model = None
++    print(f"FATAL: Model load error: {e}")
+     traceback.print_exc()
+ 
++FEATURE_NAMES_ORDER = [
++    'UsingIP', 'LongURL', 'ShortURL', 'Symbol@', 'Redirecting//',
++    'PrefixSuffix-', 'SubDomains', 'HTTPS', 'DomainRegLen', 'Favicon',
++    'NonStdPort', 'HTTPSDomainURL', 'RequestURL', 'AnchorURL',
++    'LinksInScriptTags', 'ServerFormHandler', 'InfoEmail', 'AbnormalURL',
++    'WebsiteForwarding', 'StatusBarCust', 'DisableRightClick',
++    'UsingPopupWindow', 'IframeRedirection', 'AgeofDomain',
++    'DNSRecording', 'WebsiteTraffic', 'PageRank', 'GoogleIndex',
++    'LinksPointingToPage', 'StatsReport'
++]
++
++# BUG FIX #1: Human-readable labels and explanations for every feature flag
++FEATURE_EXPLANATIONS = {
++    'UsingIP':           {'label': 'IP Address Used as Domain',        'detail': 'The URL uses a raw IP address instead of a domain name, a common phishing tactic.'},
++    'LongURL':           {'label': 'Suspicious URL Length',            'detail': 'Very long URLs are often used to hide the true destination or confuse users.'},
++    'ShortURL':          {'label': 'URL Shortener Detected',           'detail': 'URL shorteners (bit.ly, t.co) mask the true destination, a common phishing trick.'},
++    'Symbol@':           {'label': '@ Symbol in URL',                  'detail': 'The @ symbol in a URL causes browsers to ignore everything before it, redirecting to a hidden address.'},
++    'Redirecting//':     {'label': 'Multiple Redirects in URL',        'detail': 'Double slashes (//) outside the protocol indicate suspicious redirections.'},
++    'PrefixSuffix-':     {'label': 'Hyphen in Domain Name',            'detail': 'Hyphens in domain names (e.g., paypal-login.com) are frequently used in phishing domains.'},
++    'SubDomains':        {'label': 'Too Many Subdomains',              'detail': 'Excessive subdomains (e.g., login.secure.paypal.attacker.com) disguise the real domain.'},
++    'HTTPS':             {'label': 'No HTTPS / Insecure Connection',   'detail': 'The site does not use a secure HTTPS connection. Legitimate sites almost always use HTTPS.'},
++    'DomainRegLen':      {'label': 'Short Domain Registration Period', 'detail': 'Phishing domains are typically registered for short periods (under 1 year) to avoid long-term costs.'},
++    'Favicon':           {'label': 'External Favicon Source',          'detail': 'The site loads its favicon from an external domain, suggesting it may be impersonating another website.'},
++    'NonStdPort':        {'label': 'Non-Standard Port Used',           'detail': 'The URL uses an unusual port (not 80 or 443), which is atypical for legitimate websites.'},
++    'HTTPSDomainURL':    {'label': '"HTTPS" in Domain Name',           'detail': 'Having "https" in the domain name itself (not the protocol) is a deceptive tactic to appear secure.'},
++    'RequestURL':        {'label': 'External Resource Loading',        'detail': 'Most images, scripts, or media load from external domains, a sign the page may be a spoofed copy.'},
++    'AnchorURL':         {'label': 'Suspicious Anchor Links',          'detail': 'Most links on the page point to different domains, indicating a possible phishing replica.'},
++    'LinksInScriptTags': {'label': 'External Scripts Detected',        'detail': 'Scripts are loaded from external or untrusted domains, which can enable data theft.'},
++    'ServerFormHandler': {'label': 'Suspicious Form Handler',          'detail': 'Form submissions (like login forms) are sent to external servers, risking credential theft.'},
++    'InfoEmail':         {'label': 'Email Address in URL/Page',        'detail': 'A mailto: link on the page may be used to harvest user information.'},
++    'AbnormalURL':       {'label': 'Domain Mismatch (WHOIS)',          'detail': 'The URL domain does not match the registered domain in WHOIS records.'},
++    'WebsiteForwarding': {'label': 'Excessive Redirects',              'detail': 'The page redirects you multiple times before loading, a common phishing obfuscation technique.'},
++    'StatusBarCust':     {'label': 'Status Bar Manipulation',          'detail': 'JavaScript on the page changes the browser status bar to hide the true link destination.'},
++    'DisableRightClick': {'label': 'Right-Click Disabled',             'detail': 'The page disables right-click to prevent users from inspecting or copying links.'},
++    'UsingPopupWindow':  {'label': 'Popup Windows Used',               'detail': 'The page uses popup windows, often used to display fake login screens.'},
++    'IframeRedirection': {'label': 'Hidden Iframes Detected',          'detail': 'The page contains hidden iframes, which can invisibly load malicious content.'},
++    'AgeofDomain':       {'label': 'Very New Domain',                  'detail': 'The domain is less than 6 months old. Phishing sites are typically created right before an attack.'},
++    'DNSRecording':      {'label': 'No DNS Record Found',              'detail': 'No valid DNS record exists for this domain, suggesting it may be illegitimate.'},
++    'WebsiteTraffic':    {'label': 'Low / No Web Traffic',             'detail': 'The website has very little or no known web traffic, unlike established legitimate sites.'},
++    'PageRank':          {'label': 'Low Page Rank',                    'detail': 'The page has low or no search engine ranking, which is unusual for a legitimate website.'},
++    'GoogleIndex':       {'label': 'Not Indexed by Google',            'detail': 'The page is not indexed in Google search results, which is suspicious for any real website.'},
++    'LinksPointingToPage':{'label': 'No Inbound Links',               'detail': 'No other websites link to this page, unlike established legitimate sites.'},
++    'StatsReport':       {'label': 'Listed in Threat Reports',         'detail': 'The domain or IP has been flagged in known phishing or malware threat intelligence reports.'},
++}
++
++# Feature importance from the trained model (used for risk breakdown chart)
++FEATURE_IMPORTANCE = {}
++
++def load_feature_importance():
++    global FEATURE_IMPORTANCE
++    if model:
++        importances = model.feature_importances_
++        FEATURE_IMPORTANCE = dict(zip(FEATURE_NAMES_ORDER, importances.tolist()))
++
++load_feature_importance()
++
+ # ----------------------------------------------------------------------------
+-# | FEATURE EXTRACTION & HELPERS (FULL IMPLEMENTATION)
++# FEATURE EXTRACTION
+ # ----------------------------------------------------------------------------
+ def whois_worker(domain, queue):
+-    """Safely runs whois in a separate process."""
+     try:
+         w = whois.whois(domain)
+         queue.put(w)
+     except Exception:
+         queue.put(None)
+ 
+-def get_whois_with_timeout(domain, timeout=10):
+-    """Gets whois data with a timeout to prevent hanging."""
++def get_whois_with_timeout(domain, timeout=8):
+     q = Queue()
+     p = Process(target=whois_worker, args=(domain, q))
+     p.start()
+@@ -74,132 +106,176 @@ def get_whois_with_timeout(domain, timeout=10):
+     if p.is_alive():
+         p.terminate(); p.join()
+         return None
+-    return q.get()
++    return q.get() if not q.empty() else None
+ 
+ def extract_features(url: str):
+-    """
+-    Extracts all 30 features required by the model, including content-based features.
+-    """
+-    features = {name: 1 for name in feature_names_order}
+-    
++    features = {name: 1 for name in FEATURE_NAMES_ORDER}
++
+     if not re.match(r"^(https?)://", url):
+         url = "http://" + url
++
+     parsed_url = urlparse(url)
+-    domain = parsed_url.netloc
++    domain = parsed_url.netloc.split(':')[0]  # strip port from domain
+ 
+-    # --- URL-Based Features (No Content Fetch Needed) ---
++    # --- URL-Based Features ---
+     try:
+         socket.inet_aton(domain)
+         features['UsingIP'] = -1
+-    except (socket.error, ValueError): pass # It's not an IP
+-    if len(url) > 75: features['LongURL'] = -1
+-    elif 54 <= len(url) <= 75: features['LongURL'] = 0
+-    if re.search(r"bit\.ly|goo\.gl|t\.co", url): features['ShortURL'] = -1
+-    if '@' in url: features['Symbol@'] = -1
+-    if url.rfind('//') > 6: features['Redirecting//'] = -1
+-    if '-' in domain: features['PrefixSuffix-'] = -1
+-    if domain.count('.') > 3: features['SubDomains'] = -1
+-    elif domain.count('.') == 3: features['SubDomains'] = 0
+-    if not parsed_url.scheme == 'https': features['HTTPS'] = -1
+-    if parsed_url.port and parsed_url.port not in [80, 443]: features['NonStdPort'] = -1
+-    if 'https' in domain: features['HTTPSDomainURL'] = -1
++    except (socket.error, ValueError):
++        pass
++
++    url_len = len(url)
++    if url_len > 75:     features['LongURL'] = -1
++    elif url_len >= 54:  features['LongURL'] = 0
++
++    if re.search(r"bit\.ly|goo\.gl|t\.co|tinyurl|ow\.ly|is\.gd", url, re.I):
++        features['ShortURL'] = -1
++
++    if '@' in url:
++        features['Symbol@'] = -1
++
++    if url.rfind('//') > 6:
++        features['Redirecting//'] = -1
++
++    if '-' in domain:
++        features['PrefixSuffix-'] = -1
++
++    dot_count = domain.count('.')
++    if dot_count > 3:    features['SubDomains'] = -1
++    elif dot_count == 3: features['SubDomains'] = 0
++
++    if parsed_url.scheme != 'https':
++        features['HTTPS'] = -1
++
++    port = parsed_url.port
++    if port and port not in [80, 443]:
++        features['NonStdPort'] = -1
++
++    if 'https' in domain.lower():
++        features['HTTPSDomainURL'] = -1
+ 
+     # --- WHOIS-Based Features ---
+     w = get_whois_with_timeout(domain)
+     if w and w.creation_date:
+         creation_date = w.creation_date[0] if isinstance(w.creation_date, list) else w.creation_date
+-        expiration_date = w.expiration_date[0] if isinstance(w.expiration_date, list) else w.expiration_date
++        expiration_date = w.expiration_date
+         if expiration_date:
+-            reg_len = (expiration_date - creation_date).days
+-            if reg_len <= 365: features['DomainRegLen'] = -1
+-        else: features['DomainRegLen'] = -1
+-        age = (datetime.now() - creation_date).days
+-        if age < 180: features['AgeofDomain'] = -1
++            expiration_date = expiration_date[0] if isinstance(expiration_date, list) else expiration_date
++
++        # BUG FIX #2: DomainRegLen was always -1 (both if/else set to -1)
++        if expiration_date and creation_date:
++            reg_len_days = (expiration_date - creation_date).days
++            features['DomainRegLen'] = 1 if reg_len_days > 365 else -1
++        else:
++            features['DomainRegLen'] = -1
++
++        age_days = (datetime.now() - creation_date).days
++        features['AgeofDomain'] = 1 if age_days >= 180 else -1
+         features['DNSRecording'] = 1
++
++        # AbnormalURL: check if actual domain matches whois domain
++        whois_domain = w.domain_name
++        if whois_domain:
++            if isinstance(whois_domain, list):
++                match = any(domain.lower() in d.lower() for d in whois_domain)
++            else:
++                match = domain.lower() in whois_domain.lower()
++            features['AbnormalURL'] = 1 if match else -1
++        else:
++            features['AbnormalURL'] = -1
+     else:
+-        features['DomainRegLen'] = -1; features['AgeofDomain'] = -1; features['DNSRecording'] = -1
+-    if w and w.domain_name:
+-         domain_match = False
+-         if isinstance(w.domain_name, list):
+-             for d in w.domain_name:
+-                 if domain.lower() in d.lower(): domain_match = True; break
+-         elif isinstance(w.domain_name, str):
+-             if domain.lower() in w.domain_name.lower(): domain_match = True
+-         if not domain_match: features['AbnormalURL'] = -1
+-    else: features['AbnormalURL'] = -1
+-
+-    # --- Content-Based Features (Requires fetching HTML) ---
++        features['DomainRegLen'] = -1
++        features['AgeofDomain'] = -1
++        features['DNSRecording'] = -1
++        features['AbnormalURL'] = -1
++
++    # --- Content-Based Features ---
+     try:
+-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+-        response = requests.get(url, headers=headers, verify=False, timeout=10)
++        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
++        response = requests.get(url, headers=headers, verify=False, timeout=10, allow_redirects=True)
+         soup = BeautifulSoup(response.text, 'html.parser')
+-        
+-        # 10. Favicon
+-        favicon = soup.find("link", rel=re.compile(r'icon', re.I))
+-        if favicon and urlparse(urljoin(url, favicon['href'])).netloc != domain: features['Favicon'] = -1
+-        
+-        # 13. RequestURL & 14. AnchorURL & 15. LinksInScriptTags
+-        req_urls, anchor_urls, script_urls = [], [], []
+-        for tag in soup.find_all(['img', 'video', 'audio', 'script'], src=True): req_urls.append(tag['src'])
+-        for tag in soup.find_all('a', href=True): anchor_urls.append(tag['href'])
+-        for tag in soup.find_all('script', src=True): script_urls.append(tag['src'])
+-        
+-        total_req, external_req = len(req_urls), 0
+-        for r_url in req_urls:
+-            if urlparse(urljoin(url, r_url)).netloc != domain: external_req += 1
+-        if total_req > 0 and (external_req / total_req) > 0.61: features['RequestURL'] = -1
+-        
+-        total_anchor, external_anchor = len(anchor_urls), 0
+-        for a_url in anchor_urls:
+-            if urlparse(urljoin(url, a_url)).netloc != domain: external_anchor += 1
+-        if total_anchor > 0 and (external_anchor / total_anchor) > 0.67: features['AnchorURL'] = -1
+-            
+-        # 16. ServerFormHandler (SFH)
++
++        # Favicon
++        favicon_tag = soup.find("link", rel=re.compile(r'icon', re.I))
++        if favicon_tag and favicon_tag.get('href'):
++            fav_domain = urlparse(urljoin(url, favicon_tag['href'])).netloc
++            if fav_domain and fav_domain != domain:
++                features['Favicon'] = -1
++
++        # RequestURL: external resource loading
++        req_urls = [t.get('src','') for t in soup.find_all(['img','video','audio'], src=True)]
++        if req_urls:
++            ext = sum(1 for r in req_urls if urlparse(urljoin(url, r)).netloc not in ('', domain))
++            if ext / len(req_urls) > 0.61:
++                features['RequestURL'] = -1
++
++        # AnchorURL
++        anchor_urls = [a.get('href','') for a in soup.find_all('a', href=True)]
++        if anchor_urls:
++            ext_a = sum(1 for a in anchor_urls if urlparse(urljoin(url, a)).netloc not in ('', domain, ''))
++            if ext_a / len(anchor_urls) > 0.67:
++                features['AnchorURL'] = -1
++
++        # BUG FIX #3: LinksInScriptTags was never computed
++        script_tags = soup.find_all('script', src=True)
++        if script_tags:
++            ext_s = sum(1 for s in script_tags if urlparse(urljoin(url, s.get('src',''))).netloc not in ('', domain))
++            ratio = ext_s / len(script_tags)
++            if ratio > 0.17:   features['LinksInScriptTags'] = -1
++            elif ratio > 0.11: features['LinksInScriptTags'] = 0
++
++        # ServerFormHandler
+         for form in soup.find_all('form', action=True):
+-            action = form['action']
+-            if not action or action.strip() in ["", "#", "javascript:void(0)"]: features['ServerFormHandler'] = -1; break
+-            if urlparse(urljoin(url, action)).netloc != domain: features['ServerFormHandler'] = 0; break
+-        
+-        # 17. InfoEmail
+-        if re.search(r"mailto:", response.text): features['InfoEmail'] = -1
+-        
+-        # 19. WebsiteForwarding
+-        if len(response.history) > 1: features['WebsiteForwarding'] = -1
+-            
+-        # 20. StatusBarCust
+-        if re.search(r"onmouseover\s*=\s*['\"]window\.status", response.text, re.I): features['StatusBarCust'] = -1
+-            
+-        # 21. DisableRightClick
+-        if re.search(r"event\.button\s*==\s*2", response.text): features['DisableRightClick'] = -1
+-            
+-        # 22. UsingPopupWindow
+-        if re.search(r"window\.open\(", response.text): features['UsingPopupWindow'] = -1
+-            
+-        # 23. IframeRedirection
+-        if soup.find_all('iframe'): features['IframeRedirection'] = -1
++            action = form.get('action', '').strip()
++            if not action or action in ['#', 'javascript:void(0)', 'about:blank']:
++                features['ServerFormHandler'] = -1
++                break
++            form_domain = urlparse(urljoin(url, action)).netloc
++            if form_domain and form_domain != domain:
++                features['ServerFormHandler'] = 0
++                break
++
++        # InfoEmail
++        if re.search(r'mailto:', response.text, re.I):
++            features['InfoEmail'] = -1
++
++        # WebsiteForwarding
++        if len(response.history) > 1:
++            features['WebsiteForwarding'] = -1
++
++        # StatusBarCust
++        if re.search(r'onmouseover\s*=\s*[\'"]window\.status', response.text, re.I):
++            features['StatusBarCust'] = -1
++
++        # DisableRightClick
++        if re.search(r'event\.button\s*==\s*2', response.text):
++            features['DisableRightClick'] = -1
++
++        # UsingPopupWindow
++        if re.search(r'window\.open\s*\(', response.text):
++            features['UsingPopupWindow'] = -1
++
++        # IframeRedirection
++        if soup.find_all('iframe'):
++            features['IframeRedirection'] = -1
+ 
+     except requests.exceptions.RequestException:
+-        # If content fetch fails, penalize all content-based features
+-        content_features = ['Favicon', 'RequestURL', 'AnchorURL', 'LinksInScriptTags', 'ServerFormHandler', 'InfoEmail', 'WebsiteForwarding', 'StatusBarCust', 'DisableRightClick', 'UsingPopupWindow', 'IframeRedirection']
+-        for f in content_features: features[f] = -1
+-
+-    # --- External Service Features (Simulated) ---
+-    # These are hard to get for free. We simulate a plausible result.
+-    # A real system would use APIs like SimilarWeb.
+-    if features['AgeofDomain'] == -1: features['WebsiteTraffic'] = -1 # New domains have no traffic
+-    
+-    # 27. PageRank, 28. GoogleIndex, 29. LinksPointingToPage, 30. StatsReport
+-    # These are largely deprecated or require paid APIs. We default them.
+-    # A very new domain is unlikely to be indexed or have links.
++        for f in ['Favicon','RequestURL','AnchorURL','LinksInScriptTags',
++                  'ServerFormHandler','InfoEmail','WebsiteForwarding',
++                  'StatusBarCust','DisableRightClick','UsingPopupWindow','IframeRedirection']:
++            features[f] = -1
++
++    # WebsiteTraffic, PageRank, GoogleIndex, LinksPointingToPage heuristics
+     if features['AgeofDomain'] == -1:
++        features['WebsiteTraffic'] = -1
+         features['GoogleIndex'] = -1
+         features['LinksPointingToPage'] = -1
+-    
+-    feature_array = [features.get(name, 1) for name in feature_names_order]
+-    return np.array(feature_array).reshape(1, -1), features
++
++    feature_array = np.array([features.get(name, 1) for name in FEATURE_NAMES_ORDER]).reshape(1, -1)
++    return feature_array, features
+ 
+ # ----------------------------------------------------------------------------
+-# | FLASK ROUTES
++# FLASK ROUTES
+ # ----------------------------------------------------------------------------
+ @app.route("/")
+ def index():
+@@ -207,36 +283,90 @@ def index():
+ 
+ @app.route("/predict", methods=["POST"])
+ def predict():
+-    if not model: return jsonify({"error": "Model not loaded properly."}), 500
+-    url = request.get_json().get("url", "")
+-    if not url: return jsonify({"error": "No URL provided."}), 400
++    if not model:
++        return jsonify({"error": "Model not loaded."}), 500
++
++    url = request.get_json(silent=True)
++    if not url:
++        return jsonify({"error": "Invalid request."}), 400
++    url = url.get("url", "").strip()
++    if not url:
++        return jsonify({"error": "No URL provided."}), 400
+ 
+     try:
+         features_array, features_dict = extract_features(url)
+-        features_df = pd.DataFrame(features_array, columns=feature_names_order)
+-        
++        features_df = pd.DataFrame(features_array, columns=FEATURE_NAMES_ORDER)
++
+         prediction_val = model.predict(features_df)[0]
+         probabilities = model.predict_proba(features_df)[0]
+-        
++
+         is_safe = bool(prediction_val == 1)
+-        phishing_class_index = np.where(model.classes_ == -1)[0][0]
+-        phishing_prob = probabilities[phishing_class_index]
++        phishing_class_index = int(np.where(model.classes_ == -1)[0][0])
++        phishing_prob = float(probabilities[phishing_class_index])
++
++        # BUG FIX #1: Return human-readable reasons with full explanation
++        flagged_features = [k for k, v in features_dict.items() if v == -1]
++        reasons = []
++        for feat in flagged_features:
++            if feat in FEATURE_EXPLANATIONS:
++                reasons.append({
++                    "key": feat,
++                    "label": FEATURE_EXPLANATIONS[feat]["label"],
++                    "detail": FEATURE_EXPLANATIONS[feat]["detail"],
++                    "importance": round(FEATURE_IMPORTANCE.get(feat, 0) * 100, 1)
++                })
++        # Sort by importance (most impactful first)
++        reasons.sort(key=lambda x: -x["importance"])
++
++        # Risk breakdown: top 5 features by importance with their values
++        risk_breakdown = []
++        sorted_feats = sorted(FEATURE_IMPORTANCE.items(), key=lambda x: -x[1])[:8]
++        for feat, imp in sorted_feats:
++            val = features_dict.get(feat, 1)
++            risk_breakdown.append({
++                "feature": FEATURE_EXPLANATIONS.get(feat, {}).get("label", feat),
++                "importance": round(imp * 100, 1),
++                "flagged": val == -1
++            })
++
++        return jsonify({
++            "is_safe": is_safe,
++            "probability_unsafe": phishing_prob,
++            "probability_safe": float(1 - phishing_prob),
++            "reasons": reasons,
++            "risk_breakdown": risk_breakdown,
++            "total_flags": len(flagged_features),
++            "features_checked": len(FEATURE_NAMES_ORDER)
++        })
+ 
+-        response_data = {"is_safe": is_safe, "probability_unsafe": phishing_prob}
+-        if not is_safe:
+-            response_data["reasons"] = [k for k, v in features_dict.items() if v == -1]
+-        return jsonify(response_data)
+     except Exception:
+         traceback.print_exc()
+         return jsonify({"error": "Could not process the URL."}), 500
+ 
+-@app.route('/report', methods=['POST'])
++@app.route("/feature-info", methods=["GET"])
++def feature_info():
++    """New endpoint: returns all feature explanations + importances for the About page."""
++    info = []
++    for feat in FEATURE_NAMES_ORDER:
++        info.append({
++            "key": feat,
++            "label": FEATURE_EXPLANATIONS.get(feat, {}).get("label", feat),
++            "detail": FEATURE_EXPLANATIONS.get(feat, {}).get("detail", ""),
++            "importance": round(FEATURE_IMPORTANCE.get(feat, 0) * 100, 1)
++        })
++    info.sort(key=lambda x: -x["importance"])
++    return jsonify(info)
++
++@app.route("/report", methods=["POST"])
+ def report():
+-    url = request.get_json().get("url", "")
+-    if not url: return jsonify({"status": "error", "message": "No URL provided"}), 400
+-    print(f"--- [USER REPORT] URL reported as unsafe: {url} ---")
+-    return jsonify({"status": "success", "message": "URL reported successfully"})
++    data = request.get_json(silent=True)
++    if not data:
++        return jsonify({"status": "error", "message": "Invalid request"}), 400
++    url = data.get("url", "").strip()
++    if not url:
++        return jsonify({"status": "error", "message": "No URL provided"}), 400
++    print(f"[USER REPORT] URL reported as unsafe: {url}")
++    return jsonify({"status": "success", "message": "URL reported. Thank you for helping keep the web safe."})
+ 
+ if __name__ == "__main__":
+     app.run(debug=True)
+-
+diff --git a/templates/index.html b/templates/index.html
+index 41da7f2..67dbe92 100644
+--- a/templates/index.html
++++ b/templates/index.html
+@@ -3,359 +3,619 @@
+ <head>
+     <meta charset="UTF-8">
+     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+-    <title>Phishing Detector</title>
++    <title>PhishGuard — URL Safety Analyzer</title>
+     <style>
+-        @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap');
++        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+         *, *::after, *::before { margin: 0; padding: 0; box-sizing: border-box; }
+-        body {
+-            font-family: 'Roboto', sans-serif; display: flex; flex-direction: column; justify-content: center;
+-            align-items: center; min-height: 100vh;
+-            background: linear-gradient(to right, #2c5364, #203a43, #0f2027);
+-            color: #fff; padding: 2rem;
+-        }
+-        .container {
+-            width: 100%; max-width: 600px; background-color: rgba(0, 0, 0, 0.2);
+-            padding: 2.5rem; border-radius: 15px; text-align: center;
+-            border: 1px solid rgba(255, 255, 255, 0.1);
+-            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+-        }
+-        h1 { font-size: 2.5rem; margin-bottom: 0.5rem; }
+-        p { font-size: 1.1rem; margin-bottom: 2rem; color: rgba(255, 255, 255, 0.7); }
+-        .input-field {
+-            width: 100%; padding: 1rem; border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.2);
+-            background-color: rgba(0, 0, 0, 0.3); color: #fff; font-size: 1rem; margin-bottom: 1rem;
+-            outline: none; transition: all 0.2s;
+-        }
+-        .input-field:focus { border-color: #38bdf8; box-shadow: 0 0 15px rgba(56, 189, 248, 0.3); }
+-        .primary-btn {
+-            width: 100%; padding: 1rem; border-radius: 8px; border: none; background-color: #0ea5e9;
+-            color: white; font-size: 1.1rem; font-weight: 700; cursor: pointer;
+-            transition: background-color 0.2s, transform 0.2s;
+-        }
+-        .primary-btn:hover:not(:disabled) { background-color: #38bdf8; transform: translateY(-2px); }
+-        .primary-btn:disabled { background-color: #374151; cursor: not-allowed; opacity: 0.7; }
+-        .secondary-btn { background-color: transparent; border: 1px solid #0ea5e9; }
+-
+-        #auth-container form { display: flex; flex-direction: column; gap: 1rem; }
+-        
+-        #result-box {
+-            margin-top: 2rem; padding: 1.5rem; border-radius: 10px; min-height: 80px; display: none;
+-            flex-direction: column; justify-content: center; align-items: center; width: 100%;
+-            transition: opacity 0.4s, transform 0.4s;
++
++        :root {
++            --bg: #0d1117; --surface: #161b22; --surface2: #21262d;
++            --border: rgba(255,255,255,0.08); --text: #e6edf3; --muted: #8b949e;
++            --blue: #58a6ff; --green: #3fb950; --red: #f85149; --orange: #d29922;
++            --blue-dim: rgba(88,166,255,0.1); --green-dim: rgba(63,185,80,0.1);
++            --red-dim: rgba(248,81,73,0.1);
+         }
+-        #result-box.visible { display: flex; }
+-        #prediction { font-size: 1.75rem; font-weight: 700; margin-bottom: 0.5rem; }
+-        #recommendation { font-size: 0.9rem; color: rgba(255, 255, 255, 0.6); margin-top: 0.5rem; }
+-        .safe { background-color: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.5); color: #34d399; }
+-        .unsafe { background-color: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.5); color: #f87171; }
+-        
+-        .reasons-list { margin-top: 1rem; padding: 1rem; list-style-type: none; text-align: left; font-size: 0.9rem; width:100%; border-top: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.2); border-radius: 8px;}
+-        .reasons-list strong { display: block; margin-bottom: 0.5rem; color: #f87171;}
+-        .reasons-list li { margin-bottom: 0.25rem; }
+-
+-        .report-btn { margin-top: 1rem; width: 100%; padding: 0.75rem; border-radius: 8px; background-color: #f97316; border: none; color: white; font-weight: 700; }
+-        .report-btn:disabled { background-color: #7c2d12; cursor: not-allowed;}
+-        
+-        #logout-btn { margin-top: 1.5rem; width: auto; padding: 0.5rem 1rem; background-color: transparent; border-color: #f87171; color: #f87171; font-size: 0.9rem;}
+-        
+-        .info-sections { display: flex; flex-wrap: wrap; gap: 2rem; max-width: 1000px; width: 100%; margin-top: 3rem; color: rgba(255, 255, 255, 0.9); }
+-        .info-card { background-color: rgba(0, 0, 0, 0.2); padding: 1.5rem; border-radius: 15px; border: 1px solid rgba(255, 255, 255, 0.1); flex: 1; min-width: 300px; }
+-        .info-card h2 { font-size: 1.5rem; margin-bottom: 1rem; border-bottom: 1px solid rgba(255, 255, 255, 0.2); padding-bottom: 0.5rem; display: flex; justify-content: space-between; align-items: center; }
+-        .info-card ul { list-style: none; padding: 0; text-align: left; }
+-        .info-card ul li { margin-bottom: 0.75rem; line-height: 1.4; }
+-        .info-card ul li strong { color: #38bdf8; }
+-        #history-list { list-style: none; padding: 0; text-align: left; max-height: 150px; overflow-y: auto;}
+-        #history-list li { padding: 0.5rem; border-radius: 5px; cursor: pointer; transition: background-color 0.2s; word-break: break-all; }
+-        #history-list li:hover { background-color: rgba(255, 255, 255, 0.1); }
+-        #clear-history-btn { background: none; border: 1px solid #f87171; color: #f87171; padding: 0.25rem 0.5rem; border-radius: 5px; cursor: pointer; font-size: 0.8rem; }
+-        
+-        #game-modal { display: none; position: fixed; z-index: 100; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.7); backdrop-filter: blur(5px); justify-content: center; align-items: center; }
+-        #game-modal.visible { display: flex; }
+-        .game-content { width: 90%; max-width: 700px; background-color: rgba(0, 0, 0, 0.4); padding: 2rem; border-radius: 15px; border: 1px solid rgba(255, 255, 255, 0.2); text-align: center; position: relative; }
+-        #close-game-btn { position: absolute; top: 10px; right: 20px; color: #aaa; font-size: 28px; font-weight: bold; cursor: pointer; }
+-        #game-feedback { font-weight: bold; margin-top: 1rem; min-height: 24px; }
+-        .correct { color: #34d399; }
+-        .incorrect { color: #f87171; }
+-        .game-choice-btn { margin-top: 1rem; }
++
++        body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 2rem 1rem; }
++
++        /* ── AUTH ── */
++        #auth-container { width: 100%; max-width: 420px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 2.5rem; text-align: center; margin: auto; }
++        #auth-container h1 { font-size: 1.8rem; margin-bottom: 0.4rem; }
++        #auth-container .sub { color: var(--muted); font-size: 0.9rem; margin-bottom: 2rem; }
++        .field { width: 100%; padding: 0.75rem 1rem; border-radius: 8px; border: 1px solid var(--border); background: var(--surface2); color: var(--text); font-size: 0.95rem; margin-bottom: 0.75rem; outline: none; transition: border-color 0.2s; }
++        .field:focus { border-color: var(--blue); }
++        .btn { width: 100%; padding: 0.75rem; border-radius: 8px; border: none; font-size: 0.95rem; font-weight: 600; cursor: pointer; transition: all 0.2s; }
++        .btn-primary { background: var(--blue); color: #000; }
++        .btn-primary:hover:not(:disabled) { opacity: 0.85; transform: translateY(-1px); }
++        .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
++        .btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--text); margin-top: 0.5rem; }
++        .btn-ghost:hover { border-color: var(--blue); color: var(--blue); }
++        .divider { display: flex; align-items: center; gap: 1rem; color: var(--muted); font-size: 0.8rem; margin: 1rem 0; }
++        .divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
++
++        /* ── MAIN APP ── */
++        #app-container { display: none; width: 100%; max-width: 900px; }
++        .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; }
++        .topbar h1 { font-size: 1.4rem; display: flex; align-items: center; gap: 0.5rem; }
++        .topbar h1 span { color: var(--blue); }
++        .tabs { display: flex; gap: 0.25rem; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 0.25rem; }
++        .tab { padding: 0.4rem 1rem; border-radius: 6px; border: none; background: transparent; color: var(--muted); cursor: pointer; font-size: 0.85rem; font-weight: 500; transition: all 0.2s; }
++        .tab.active { background: var(--surface2); color: var(--text); }
++
++        /* ── SCANNER ── */
++        .scanner-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 2rem; margin-bottom: 1.5rem; }
++        .url-row { display: flex; gap: 0.75rem; }
++        .url-row .field { margin: 0; flex: 1; }
++        .url-row .btn { width: auto; padding: 0.75rem 1.5rem; }
++        .scanner-card p { color: var(--muted); font-size: 0.85rem; margin-top: 0.75rem; }
++
++        /* ── RESULT ── */
++        #result-area { display: none; }
++        .result-card { border-radius: 12px; padding: 1.5rem; margin-bottom: 1rem; border: 1px solid; }
++        .result-card.safe { background: var(--green-dim); border-color: rgba(63,185,80,0.3); }
++        .result-card.unsafe { background: var(--red-dim); border-color: rgba(248,81,73,0.3); }
++        .result-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }
++        .verdict { font-size: 1.5rem; font-weight: 700; display: flex; align-items: center; gap: 0.5rem; }
++        .verdict.safe { color: var(--green); }
++        .verdict.unsafe { color: var(--red); }
++        .score-ring { position: relative; width: 80px; height: 80px; flex-shrink: 0; }
++        .score-ring svg { transform: rotate(-90deg); }
++        .score-ring .ring-text { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 1.1rem; font-weight: 700; }
++        .result-sub { color: var(--muted); font-size: 0.85rem; margin-top: 0.4rem; }
++        .flags-summary { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border); font-size: 0.85rem; color: var(--muted); }
++        .flags-summary strong { color: var(--text); }
++
++        /* risk bar chart */
++        .risk-chart { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 1.5rem; margin-bottom: 1rem; }
++        .risk-chart h3 { font-size: 0.95rem; font-weight: 600; margin-bottom: 1rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
++        .bar-row { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.6rem; font-size: 0.82rem; }
++        .bar-label { width: 200px; flex-shrink: 0; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
++        .bar-track { flex: 1; height: 8px; background: var(--surface2); border-radius: 4px; overflow: hidden; }
++        .bar-fill { height: 100%; border-radius: 4px; transition: width 0.6s ease; }
++        .bar-fill.flagged { background: var(--red); }
++        .bar-fill.ok { background: var(--green); }
++        .bar-pct { width: 38px; text-align: right; color: var(--muted); flex-shrink: 0; }
++
++        /* reasons */
++        .reasons-section { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 1.5rem; margin-bottom: 1rem; }
++        .reasons-section h3 { font-size: 0.95rem; font-weight: 600; margin-bottom: 1rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
++        .reason-item { display: flex; gap: 0.75rem; padding: 0.85rem; border-radius: 8px; background: var(--surface2); margin-bottom: 0.5rem; border-left: 3px solid var(--red); }
++        .reason-item .icon { font-size: 1.1rem; flex-shrink: 0; margin-top: 1px; }
++        .reason-item .reason-label { font-weight: 600; font-size: 0.9rem; margin-bottom: 0.2rem; }
++        .reason-item .reason-detail { font-size: 0.82rem; color: var(--muted); line-height: 1.5; }
++        .reason-item .reason-impact { font-size: 0.75rem; color: var(--orange); margin-top: 0.3rem; font-weight: 500; }
++        .report-btn { width: 100%; padding: 0.75rem; border-radius: 8px; background: rgba(248,81,73,0.15); border: 1px solid rgba(248,81,73,0.3); color: var(--red); font-weight: 600; cursor: pointer; transition: all 0.2s; margin-top: 1rem; }
++        .report-btn:hover:not(:disabled) { background: rgba(248,81,73,0.25); }
++        .report-btn:disabled { opacity: 0.5; cursor: not-allowed; }
++
++        /* ── BOTTOM GRID ── */
++        .bottom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
++        @media (max-width: 600px) { .bottom-grid { grid-template-columns: 1fr; } .url-row { flex-direction: column; } }
++        .info-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 1.5rem; }
++        .info-card h3 { font-size: 0.95rem; font-weight: 600; margin-bottom: 1rem; display: flex; justify-content: space-between; align-items: center; }
++        .info-card ul { list-style: none; }
++        .info-card ul li { padding: 0.4rem 0; font-size: 0.85rem; color: var(--muted); border-bottom: 1px solid var(--border); line-height: 1.5; }
++        .info-card ul li:last-child { border-bottom: none; }
++        .info-card ul li strong { color: var(--blue); }
++
++        /* history */
++        #history-list { max-height: 180px; overflow-y: auto; }
++        .history-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem; border-radius: 6px; cursor: pointer; transition: background 0.15s; }
++        .history-item:hover { background: var(--surface2); }
++        .history-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
++        .history-dot.safe { background: var(--green); }
++        .history-dot.unsafe { background: var(--red); }
++        .history-dot.unknown { background: var(--muted); }
++        .history-url { font-size: 0.82rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
++        .clear-btn { background: none; border: 1px solid var(--border); color: var(--muted); padding: 0.2rem 0.5rem; border-radius: 5px; cursor: pointer; font-size: 0.75rem; }
++        .clear-btn:hover { border-color: var(--red); color: var(--red); }
++
++        /* ── ABOUT TAB ── */
++        #about-tab { display: none; }
++        .about-section { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 1.5rem; margin-bottom: 1rem; }
++        .about-section h3 { font-size: 1rem; font-weight: 600; margin-bottom: 1rem; }
++        .about-section p { color: var(--muted); font-size: 0.9rem; line-height: 1.7; margin-bottom: 0.75rem; }
++        .feat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
++        @media (max-width: 600px) { .feat-grid { grid-template-columns: 1fr; } }
++        .feat-card { background: var(--surface2); border-radius: 8px; padding: 0.85rem; border-left: 3px solid var(--blue); }
++        .feat-card .feat-name { font-weight: 600; font-size: 0.85rem; margin-bottom: 0.3rem; }
++        .feat-card .feat-detail { font-size: 0.78rem; color: var(--muted); line-height: 1.5; }
++        .feat-card .feat-imp { font-size: 0.72rem; color: var(--orange); margin-top: 0.3rem; }
++        .model-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-bottom: 1rem; }
++        .stat-box { background: var(--surface2); border-radius: 8px; padding: 1rem; text-align: center; }
++        .stat-box .stat-val { font-size: 1.5rem; font-weight: 700; color: var(--blue); }
++        .stat-box .stat-label { font-size: 0.75rem; color: var(--muted); margin-top: 0.2rem; }
++
++        /* ── GAME ── */
++        #game-modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.8); backdrop-filter: blur(6px); z-index: 100; justify-content: center; align-items: center; }
++        #game-modal.open { display: flex; }
++        .game-box { width: 90%; max-width: 560px; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 2rem; text-align: center; position: relative; }
++        .game-box h2 { margin-bottom: 0.5rem; }
++        .game-box .game-sub { color: var(--muted); font-size: 0.85rem; margin-bottom: 1.5rem; }
++        .close-modal { position: absolute; top: 1rem; right: 1.25rem; background: none; border: none; color: var(--muted); font-size: 1.5rem; cursor: pointer; }
++        .close-modal:hover { color: var(--text); }
++        .game-url-display { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 0.85rem 1rem; font-family: monospace; font-size: 0.95rem; margin-bottom: 1rem; word-break: break-all; }
++        .game-choices { display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap; margin-bottom: 1rem; }
++        .game-choice-btn { padding: 0.6rem 1.5rem; border-radius: 8px; border: 1px solid var(--border); background: var(--surface2); color: var(--text); font-weight: 600; cursor: pointer; transition: all 0.2s; }
++        .game-choice-btn:hover:not(:disabled) { border-color: var(--blue); color: var(--blue); }
++        .game-choice-btn:disabled { cursor: not-allowed; }
++        .game-choice-btn.correct-ans { background: var(--green-dim); border-color: var(--green); color: var(--green); }
++        .game-choice-btn.wrong-ans { background: var(--red-dim); border-color: var(--red); color: var(--red); }
++        #game-feedback { min-height: 24px; font-weight: 600; margin-bottom: 0.75rem; }
++        .game-scoreboard { display: flex; justify-content: center; gap: 2rem; font-size: 0.85rem; color: var(--muted); margin-bottom: 1rem; }
++        .game-scoreboard span { color: var(--text); font-weight: 700; }
++
++        /* ── LOGOUT ── */
++        .logout-btn { background: none; border: 1px solid var(--border); color: var(--muted); padding: 0.4rem 0.85rem; border-radius: 6px; cursor: pointer; font-size: 0.82rem; transition: all 0.2s; }
++        .logout-btn:hover { border-color: var(--red); color: var(--red); }
++
++        /* ── SPINNER ── */
++        .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(0,0,0,0.3); border-top-color: #000; border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; }
++        @keyframes spin { to { transform: rotate(360deg); } }
++
++        /* ── TOAST ── */
++        #toast { position: fixed; bottom: 2rem; left: 50%; transform: translateX(-50%) translateY(80px); background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem 1.25rem; font-size: 0.85rem; transition: transform 0.3s; z-index: 200; white-space: nowrap; }
++        #toast.show { transform: translateX(-50%) translateY(0); }
++
++        scrollbar-width: thin;
++        ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: transparent; } ::-webkit-scrollbar-thumb { background: var(--surface2); border-radius: 3px; }
+     </style>
+ </head>
+ <body>
+-    
+-    <div id="auth-container" class="container">
+-        <h1>Welcome</h1>
+-        <p>Please login or sign up to use the detector</p>
+-        <form id="auth-form">
+-            <input type="text" id="username-input" class="input-field" placeholder="Username" required>
+-            <input type="password" id="password-input" class="input-field" placeholder="Password" required>
+-            <button type="submit" id="login-btn" class="primary-btn">Login</button>
+-            <button type="button" id="signup-btn" class="primary-btn secondary-btn">Sign Up</button>
+-        </form>
++
++<!-- ═══ AUTH ═══ -->
++<div id="auth-container">
++    <div style="font-size:2rem;margin-bottom:0.5rem">🛡️</div>
++    <h1>PhishGuard</h1>
++    <p class="sub">AI-powered URL safety analyzer</p>
++    <input type="text" id="username-input" class="field" placeholder="Username" autocomplete="username">
++    <input type="password" id="password-input" class="field" placeholder="Password" autocomplete="current-password">
++    <button id="login-btn" class="btn btn-primary">Login</button>
++    <div class="divider">or</div>
++    <button id="signup-btn" class="btn btn-ghost">Create Account</button>
++</div>
++
++<!-- ═══ MAIN APP ═══ -->
++<div id="app-container">
++    <div class="topbar">
++        <h1>🛡️ Phish<span>Guard</span></h1>
++        <div style="display:flex;align-items:center;gap:1rem">
++            <div class="tabs">
++                <button class="tab active" data-tab="scanner">Scanner</button>
++                <button class="tab" data-tab="game">Game</button>
++                <button class="tab" data-tab="about">About</button>
++            </div>
++            <button class="logout-btn" id="logout-btn">Logout</button>
++        </div>
+     </div>
+ 
+-    <div id="app-container" style="display: none;">
+-        <div class="container">
+-            <h1>Phishing Detector</h1>
+-            <p>Enter a URL to check if it's safe or a phishing attempt.</p>
+-            <form id="url-form">
+-                <input type="text" id="url-input" class="input-field" placeholder="e.g., example.com" required>
+-                <button type="submit" id="submit-btn" class="primary-btn">Check URL</button>
+-            </form>
+-            <div id="result-box">
+-                 <p id="prediction"></p>
+-                 <p id="recommendation"></p>
++    <!-- SCANNER TAB -->
++    <div id="scanner-tab">
++        <div class="scanner-card">
++            <div class="url-row">
++                <input type="text" id="url-input" class="field" placeholder="Enter a URL to analyze  e.g. example.com or https://site.com" autocomplete="off">
++                <button id="submit-btn" class="btn btn-primary">Analyze</button>
++            </div>
++            <p>🔒 Checks 30 security signals including HTTPS, domain age, redirects, and content patterns.</p>
++        </div>
++
++        <div id="result-area">
++            <!-- verdict card -->
++            <div id="result-card" class="result-card">
++                <div class="result-header">
++                    <div>
++                        <div id="verdict-text" class="verdict"></div>
++                        <div class="result-sub" id="result-sub"></div>
++                        <div class="flags-summary" id="flags-summary"></div>
++                    </div>
++                    <div class="score-ring">
++                        <svg width="80" height="80" viewBox="0 0 80 80">
++                            <circle cx="40" cy="40" r="32" fill="none" stroke="#21262d" stroke-width="8"/>
++                            <circle id="ring-arc" cx="40" cy="40" r="32" fill="none" stroke="#3fb950" stroke-width="8"
++                                stroke-dasharray="201" stroke-dashoffset="201" stroke-linecap="round"/>
++                        </svg>
++                        <div class="ring-text"><span id="ring-pct">0%</span></div>
++                    </div>
++                </div>
++            </div>
++
++            <!-- risk breakdown bar chart -->
++            <div class="risk-chart" id="risk-chart-section">
++                <h3>📊 Risk Factor Breakdown</h3>
++                <div id="bar-chart"></div>
++            </div>
++
++            <!-- reasons / flags -->
++            <div class="reasons-section" id="reasons-section" style="display:none">
++                <h3>⚠️ Flagged Signals</h3>
++                <div id="reasons-list"></div>
++                <button class="report-btn" id="report-btn">🚨 Report this URL as Unsafe</button>
+             </div>
+-            <button id="logout-btn" class="primary-btn secondary-btn">Logout</button>
+         </div>
+ 
+-        <div class="info-sections">
+-             <div class="info-card" id="safety-tips">
+-                <h2>Safety Measures</h2>
++        <div class="bottom-grid">
++            <div class="info-card">
++                <h3>🛡️ Safety Tips</h3>
+                 <ul>
+-                    <li><strong>Check the Domain:</strong> Always double-check the address bar. Phishing sites often use misspelled domains (e.g., G00gle.com instead of Google.com).</li>
+-                    <li><strong>Look for HTTPS:</strong> Legitimate websites use a secure connection. Look for `https://` and a padlock icon 🔒 in the address bar.</li>
+-                    <li><strong>Hover, Don't Click:</strong> Before clicking a link, hover your mouse over it to see the actual destination URL at the bottom of your browser.</li>
+-                    <li><strong>Beware of Urgency:</strong> Attackers create a false sense of urgency to trick you into acting without thinking. Be wary of "immediate action required" messages.</li>
+-                    <li><strong>Protect Personal Info:</strong> Never enter sensitive information like passwords or credit card numbers unless you are absolutely sure the site is legitimate.</li>
++                    <li><strong>Check the domain:</strong> Phishing sites use misspellings — G00gle vs Google.</li>
++                    <li><strong>Look for HTTPS:</strong> Legitimate sites use secure connections (🔒 padlock).</li>
++                    <li><strong>Hover before clicking:</strong> See the real destination before you click any link.</li>
++                    <li><strong>Beware of urgency:</strong> "Act now!" messages are classic phishing pressure tactics.</li>
++                    <li><strong>Protect credentials:</strong> Never enter passwords on suspicious pages.</li>
+                 </ul>
+             </div>
+-            <div class="info-card" id="history-section">
+-                <h2>History <button id="clear-history-btn" title="Clear History">Clear</button></h2>
+-                <ul id="history-list"></ul>
+-            </div>
+-            <div class="info-card" id="game-launcher">
+-                <h2>Test Your Skills</h2>
+-                <p>Think you can spot a fake URL? Play our game to find out!</p>
+-                <button id="play-game-btn" class="primary-btn">Play the Phish Game</button>
++            <div class="info-card">
++                <h3>🕓 Scan History <button class="clear-btn" id="clear-history-btn">Clear</button></h3>
++                <div id="history-list"></div>
+             </div>
+         </div>
+     </div>
+ 
+-    <div id="game-modal">
+-        <div class="game-content">
+-            <span id="close-game-btn">&times;</span>
+-            <h2>Spot the Phish!</h2>
+-            <p id="game-question">Which of the following links is the phishing attempt?</p>
+-            <div id="game-choices">
+-                <button class="primary-btn game-choice-btn"></button>
+-                <button class="primary-btn game-choice-btn"></button>
++    <!-- GAME TAB -->
++    <div id="game-tab" style="display:none">
++        <div class="scanner-card" style="text-align:center">
++            <h2 style="margin-bottom:0.5rem">🎮 Spot the Phish!</h2>
++            <p style="color:var(--muted);font-size:0.9rem;margin-bottom:1.5rem">Can you tell which URL is a phishing attempt? Train your eye before attackers train on you.</p>
++            <button id="play-game-btn" class="btn btn-primary" style="width:auto;padding:0.75rem 2rem">Start Game</button>
++        </div>
++    </div>
++
++    <!-- ABOUT TAB -->
++    <div id="about-tab">
++        <div class="about-section">
++            <h3>🤖 How PhishGuard Works</h3>
++            <p>PhishGuard uses a <strong>Random Forest classifier</strong> trained on 30 security features extracted from URLs and their web content. The model was trained on thousands of labeled phishing and legitimate URLs from public datasets.</p>
++            <p>When you submit a URL, the system extracts features in real time — checking URL structure, domain registration data (WHOIS), page content, form handlers, scripts, and more. The model then predicts whether the site is safe or a phishing attempt, along with a confidence score.</p>
++            <div class="model-stats">
++                <div class="stat-box"><div class="stat-val">30</div><div class="stat-label">Features Checked</div></div>
++                <div class="stat-box"><div class="stat-val">RF</div><div class="stat-label">Random Forest Model</div></div>
++                <div class="stat-box"><div class="stat-val">85%+</div><div class="stat-label">Accuracy</div></div>
++            </div>
++        </div>
++        <div class="about-section">
++            <h3>📋 All 30 Security Signals</h3>
++            <p style="margin-bottom:1rem">Sorted by impact on the model's prediction:</p>
++            <div class="feat-grid" id="feature-grid">
++                <div style="color:var(--muted);font-size:0.85rem">Loading feature info...</div>
+             </div>
+-            <div id="game-feedback"></div>
+-            <p><strong>Score: <span id="game-score">0</span></strong></p>
+-            <button id="next-round-btn" class="primary-btn" style="display: none;">Next Round</button>
+         </div>
+     </div>
++</div>
++
++<!-- ═══ GAME MODAL ═══ -->
++<div id="game-modal">
++    <div class="game-box">
++        <button class="close-modal" id="close-game-btn">✕</button>
++        <h2>🎯 Spot the Phish!</h2>
++        <p class="game-sub">Which of the two URLs below is the phishing attempt?</p>
++        <div class="game-url-display" id="game-url-display"></div>
++        <div class="game-choices" id="game-choices">
++            <button class="game-choice-btn" id="choice-a"></button>
++            <button class="game-choice-btn" id="choice-b"></button>
++        </div>
++        <div id="game-feedback"></div>
++        <div class="game-scoreboard">
++            <div>Score: <span id="game-score">0</span></div>
++            <div>Round: <span id="game-round">1</span></div>
++            <div>Streak: <span id="game-streak">0</span> 🔥</div>
++        </div>
++        <button id="next-round-btn" class="btn btn-primary" style="display:none">Next Round →</button>
++    </div>
++</div>
+ 
+-    <script>
+-        document.addEventListener('DOMContentLoaded', () => {
+-            // --- DOM ELEMENT REFERENCES ---
+-            const authContainer = document.getElementById('auth-container');
+-            const appContainer = document.getElementById('app-container');
+-            const authForm = document.getElementById('auth-form');
+-            const signupBtn = document.getElementById('signup-btn');
+-            const logoutBtn = document.getElementById('logout-btn');
+-            const urlForm = document.getElementById('url-form');
+-            const urlInput = document.getElementById('url-input');
+-            const submitBtn = document.getElementById('submit-btn');
+-            const resultBox = document.getElementById('result-box');
+-            const predictionEl = document.getElementById('prediction');
+-            const recommendationEl = document.getElementById('recommendation');
+-            const historyList = document.getElementById('history-list');
+-            const clearHistoryBtn = document.getElementById('clear-history-btn');
+-            const gameModal = document.getElementById('game-modal');
+-            const playGameBtn = document.getElementById('play-game-btn');
+-            const closeGameBtn = document.getElementById('close-game-btn');
+-            const gameChoices = document.getElementById('game-choices');
+-            const gameFeedback = document.getElementById('game-feedback');
+-            const gameScoreEl = document.getElementById('game-score');
+-            const nextRoundBtn = document.getElementById('next-round-btn');
+-            
+-            // --- STATE MANAGEMENT ---
+-            let history = [];
+-            let gameScore = 0;
+-            let currentPhishUrl = '';
+-
+-            // --- AUTHENTICATION LOGIC ---
+-            const showApp = () => {
+-                authContainer.style.display = 'none';
+-                appContainer.style.display = 'block';
+-                document.body.style.justifyContent = 'flex-start'; // Align content to top for scrolling
+-                loadHistory();
+-            };
+-            const showLogin = () => {
+-                appContainer.style.display = 'none';
+-                authContainer.style.display = 'block';
+-                document.body.style.justifyContent = 'center'; // Re-center for login page
+-            };
+-
+-            authForm.addEventListener('submit', (e) => {
+-                e.preventDefault();
+-                showApp();
++<!-- ═══ TOAST ═══ -->
++<div id="toast"></div>
++
++<script>
++document.addEventListener('DOMContentLoaded', () => {
++
++    // ── STATE ──
++    let scanHistory = JSON.parse(localStorage.getItem('phishguard_history') || '[]');
++    let currentUrl = '';
++    let gameScore = 0, gameRound = 1, gameStreak = 0, currentPhishUrl = '';
++
++    // ── DOM REFS ──
++    const authContainer = document.getElementById('auth-container');
++    const appContainer  = document.getElementById('app-container');
++    const urlInput      = document.getElementById('url-input');
++    const submitBtn     = document.getElementById('submit-btn');
++    const resultArea    = document.getElementById('result-area');
++    const historyList   = document.getElementById('history-list');
++
++    // ── TOAST ──
++    function showToast(msg, duration = 3000) {
++        const t = document.getElementById('toast');
++        t.textContent = msg;
++        t.classList.add('show');
++        setTimeout(() => t.classList.remove('show'), duration);
++    }
++
++    // ── AUTH ──
++    document.getElementById('login-btn').onclick = () => {
++        if (!document.getElementById('username-input').value) { showToast('Please enter a username'); return; }
++        showApp();
++    };
++    document.getElementById('signup-btn').onclick = showApp;
++    document.getElementById('logout-btn').onclick = () => {
++        appContainer.style.display = 'none';
++        authContainer.style.display = 'block';
++    };
++
++    function showApp() {
++        authContainer.style.display = 'none';
++        appContainer.style.display = 'block';
++        renderHistory();
++    }
++
++    // ── TABS ──
++    document.querySelectorAll('.tab').forEach(tab => {
++        tab.addEventListener('click', () => {
++            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
++            tab.classList.add('active');
++            const name = tab.dataset.tab;
++            document.getElementById('scanner-tab').style.display = name === 'scanner' ? 'block' : 'none';
++            document.getElementById('game-tab').style.display    = name === 'game'    ? 'block' : 'none';
++            document.getElementById('about-tab').style.display   = name === 'about'   ? 'block' : 'none';
++            if (name === 'about') loadFeatureInfo();
++            if (name === 'game') document.getElementById('about-tab').style.display = 'none';
++        });
++    });
++
++    // ── SCANNER ──
++    submitBtn.addEventListener('click', runScan);
++    urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') runScan(); });
++
++    async function runScan() {
++        const url = urlInput.value.trim();
++        if (!url) { showToast('Please enter a URL first'); return; }
++        currentUrl = url;
++
++        submitBtn.disabled = true;
++        submitBtn.innerHTML = '<span class="spinner"></span> Analyzing...';
++        resultArea.style.display = 'none';
++
++        try {
++            const res = await fetch('/predict', {
++                method: 'POST',
++                headers: { 'Content-Type': 'application/json' },
++                body: JSON.stringify({ url })
+             });
+-            signupBtn.addEventListener('click', showApp);
+-            logoutBtn.addEventListener('click', showLogin);
+-
+-            // --- REPORTING FUNCTION ---
+-            async function reportUrl(url, reportBtn) {
+-                reportBtn.textContent = 'Reporting...';
+-                reportBtn.disabled = true;
+-                try {
+-                    const response = await fetch('/report', {
+-                        method: 'POST',
+-                        headers: {'Content-Type': 'application/json'},
+-                        body: JSON.stringify({ url })
+-                    });
+-                    if (!response.ok) throw new Error('Report failed');
+-                    reportBtn.textContent = 'Reported Successfully!';
+-                } catch (err) {
+-                    console.error("Report Error:", err);
+-                    reportBtn.textContent = 'Reporting Failed';
+-                    setTimeout(() => {
+-                        reportBtn.textContent = 'Report this URL as Unsafe';
+-                        reportBtn.disabled = false;
+-                    }, 2000);
+-                }
+-            }
++            if (!res.ok) throw new Error(`Server error ${res.status}`);
++            const data = await res.json();
++            if (data.error) throw new Error(data.error);
++            renderResult(data, url);
++            addToHistory(url, data.is_safe);
++        } catch (err) {
++            showToast('❌ ' + err.message);
++        } finally {
++            submitBtn.disabled = false;
++            submitBtn.textContent = 'Analyze';
++        }
++    }
++
++    function renderResult(data, url) {
++        resultArea.style.display = 'block';
++        const card     = document.getElementById('result-card');
++        const verdict  = document.getElementById('verdict-text');
++        const sub      = document.getElementById('result-sub');
++        const flagsSumm= document.getElementById('flags-summary');
++        const ringArc  = document.getElementById('ring-arc');
++        const ringPct  = document.getElementById('ring-pct');
++
++        const safePercent   = Math.round(data.probability_safe * 100);
++        const unsafePercent = Math.round(data.probability_unsafe * 100);
++        const circumference = 2 * Math.PI * 32; // ≈ 201
++
++        if (data.is_safe) {
++            card.className = 'result-card safe';
++            verdict.className = 'verdict safe';
++            verdict.textContent = `✅ Website is ${safePercent}% Safe`;
++            sub.textContent = 'This URL does not exhibit significant phishing indicators.';
++            ringArc.style.stroke = '#3fb950';
++            ringArc.style.strokeDashoffset = circumference * (1 - safePercent / 100);
++            ringPct.textContent = safePercent + '%';
++        } else {
++            card.className = 'result-card unsafe';
++            verdict.className = 'verdict unsafe';
++            verdict.textContent = `⚠️ Website is ${unsafePercent}% Unsafe`;
++            sub.textContent = 'This URL shows signs of a phishing or malicious site.';
++            ringArc.style.stroke = '#f85149';
++            ringArc.style.strokeDashoffset = circumference * (1 - unsafePercent / 100);
++            ringPct.textContent = unsafePercent + '%';
++        }
++
++        flagsSumm.innerHTML = `<div>${data.total_flags} of ${data.features_checked} signals flagged</div>` +
++            `<div>Recommended threshold: ≥85% safe to proceed</div>`;
++
++        // Risk breakdown bar chart
++        const barChart = document.getElementById('bar-chart');
++        barChart.innerHTML = '';
++        (data.risk_breakdown || []).forEach(item => {
++            barChart.innerHTML += `
++            <div class="bar-row">
++                <div class="bar-label" title="${item.feature}">${item.feature}</div>
++                <div class="bar-track">
++                    <div class="bar-fill ${item.flagged ? 'flagged' : 'ok'}" style="width:${Math.min(item.importance * 3, 100)}%"></div>
++                </div>
++                <div class="bar-pct">${item.importance}%</div>
++                <div style="width:14px;font-size:0.8rem">${item.flagged ? '🚩' : '✅'}</div>
++            </div>`;
++        });
++
++        // Flagged reasons
++        const reasonsSection = document.getElementById('reasons-section');
++        const reasonsList    = document.getElementById('reasons-list');
++        const reportBtn      = document.getElementById('report-btn');
+ 
+-            // --- HISTORY FUNCTIONS ---
+-            const renderHistory = () => {
+-                historyList.innerHTML = '';
+-                history.forEach(url => {
+-                    const li = document.createElement('li');
+-                    li.textContent = url;
+-                    li.title = 'Click to re-check this URL';
+-                    li.onclick = () => { urlInput.value = url; urlForm.dispatchEvent(new Event('submit')); };
+-                    historyList.appendChild(li);
+-                });
+-            };
+-            const saveHistory = () => localStorage.setItem('phishingHistory', JSON.stringify(history));
+-            const loadHistory = () => {
+-                history = JSON.parse(localStorage.getItem('phishingHistory') || '[]');
+-                renderHistory();
+-            };
+-            clearHistoryBtn.addEventListener('click', () => { history = []; saveHistory(); renderHistory(); });
+-
+-            // --- PHISHING DETECTOR LOGIC ---
+-            urlForm.addEventListener('submit', async (e) => {
+-                e.preventDefault();
+-                const url = urlInput.value.trim();
+-                if (!url) return;
+-                
+-                submitBtn.disabled = true;
+-                submitBtn.textContent = 'Analyzing...';
+-                resultBox.className = 'result-box'; // Hide and reset colors
+-                
+-                // Clear dynamic content before new analysis
+-                resultBox.innerHTML = '<p id="prediction"></p><p id="recommendation"></p>';
+-                const newPredictionEl = document.getElementById('prediction');
+-                const newRecommendationEl = document.getElementById('recommendation');
+-                newPredictionEl.textContent = 'Analyzing...';
+-                
+-
+-                try {
+-                    const response = await fetch('/predict', {
+-                        method: 'POST',
+-                        headers: {'Content-Type': 'application/json'},
+-                        body: JSON.stringify({ url })
+-                    });
+-                    if (!response.ok) throw new Error(`Server Error: ${response.status}`);
+-                    const data = await response.json();
+-                    
+-                    resultBox.classList.add('visible');
+-                    if (data.error) {
+-                        newPredictionEl.textContent = data.error;
+-                        resultBox.classList.add('unsafe');
+-                    } else {
+-                        if (data.is_safe) {
+-                            const safePercent = Math.round((1 - data.probability_unsafe) * 100);
+-                            newPredictionEl.textContent = `Website is ${safePercent}% Safe ✅`;
+-                            resultBox.classList.add('safe');
+-                        } else {
+-                            const unsafePercent = Math.round(data.probability_unsafe * 100);
+-                            newPredictionEl.textContent = `Website is ${unsafePercent}% Unsafe ⚠️`;
+-                            resultBox.classList.add('unsafe');
+-                            
+-                            if (data.reasons && data.reasons.length > 0) {
+-                                const reasonsList = document.createElement('ul');
+-                                reasonsList.className = 'reasons-list';
+-                                let reasonsHtml = '<strong>Flagged Features:</strong>';
+-                                data.reasons.forEach(reason => { reasonsHtml += `<li>- ${reason}</li>`; });
+-                                reasonsList.innerHTML = reasonsHtml;
+-                                resultBox.appendChild(reasonsList);
+-                            }
+-                            
+-                            const reportBtn = document.createElement('button');
+-                            reportBtn.className = 'report-btn';
+-                            reportBtn.textContent = 'Report this URL as Unsafe';
+-                            reportBtn.onclick = () => reportUrl(url, reportBtn);
+-                            resultBox.appendChild(reportBtn);
+-                        }
+-                        newRecommendationEl.textContent = `Only use this website if it's 85% or above safe.`;
+-                    }
+-                    if (!history.includes(url)) {
+-                        history.unshift(url);
+-                        history = history.slice(0, 5); // Keep last 5
+-                        saveHistory();
+-                        renderHistory();
+-                    }
+-                } catch (err) {
+-                    console.error("Fetch Error:", err);
+-                    resultBox.classList.add('visible', 'unsafe');
+-                    newPredictionEl.textContent = "Could not connect to the server.";
+-                } finally {
+-                    submitBtn.disabled = false;
+-                    submitBtn.textContent = 'Check URL';
+-                }
++        if (!data.is_safe && data.reasons && data.reasons.length > 0) {
++            reasonsSection.style.display = 'block';
++            reasonsList.innerHTML = '';
++            data.reasons.forEach(r => {
++                reasonsList.innerHTML += `
++                <div class="reason-item">
++                    <div class="icon">🚩</div>
++                    <div>
++                        <div class="reason-label">${r.label}</div>
++                        <div class="reason-detail">${r.detail}</div>
++                        <div class="reason-impact">Model weight: ${r.importance}% impact on prediction</div>
++                    </div>
++                </div>`;
+             });
++            reportBtn.textContent = '🚨 Report this URL as Unsafe';
++            reportBtn.disabled = false;
++            reportBtn.onclick = () => reportUrl(currentUrl, reportBtn);
++        } else {
++            reasonsSection.style.display = 'none';
++        }
++    }
+ 
+-            // --- GAME LOGIC ---
+-            const phishingExamples = [
+-                { safe: 'linkedin.com', phish: 'Iinkedin.com' }, { safe: 'microsoft.com', phish: 'microsfot.com' },
+-                { safe: 'apple.com', phish: 'appie.com' }, { safe: 'google.com', phish: 'g00gle.com' },
+-                { safe: 'paypal.com', phish: 'paypa1.com' }, { safe: 'amazon.com', phish: 'arnazon.com' }
+-            ];
+-
+-            function startNewRound() {
+-                const example = phishingExamples[Math.floor(Math.random() * phishingExamples.length)];
+-                currentPhishUrl = example.phish;
+-                
+-                const choices = [example.safe, example.phish].sort(() => Math.random() - 0.5);
+-                
+-                const buttons = gameChoices.querySelectorAll('button');
+-                buttons.forEach((btn, index) => {
+-                    btn.textContent = choices[index];
+-                    btn.disabled = false;
+-                    btn.className = 'primary-btn game-choice-btn'; // Reset style
+-                });
+-
+-                gameFeedback.textContent = '';
+-                nextRoundBtn.style.display = 'none';
+-            }
++    // ── REPORT ──
++    async function reportUrl(url, btn) {
++        btn.textContent = 'Reporting...';
++        btn.disabled = true;
++        try {
++            const res = await fetch('/report', {
++                method: 'POST',
++                headers: { 'Content-Type': 'application/json' },
++                body: JSON.stringify({ url })
++            });
++            const data = await res.json();
++            btn.textContent = '✅ Reported Successfully';
++            showToast('Thank you for helping keep the web safe!');
++        } catch {
++            btn.textContent = 'Report Failed';
++            setTimeout(() => { btn.textContent = '🚨 Report this URL as Unsafe'; btn.disabled = false; }, 2000);
++        }
++    }
++
++    // ── HISTORY ──
++    function addToHistory(url, isSafe) {
++        const entry = { url, isSafe, time: Date.now() };
++        scanHistory = [entry, ...scanHistory.filter(h => h.url !== url)].slice(0, 10);
++        localStorage.setItem('phishguard_history', JSON.stringify(scanHistory));
++        renderHistory();
++    }
++
++    function renderHistory() {
++        historyList.innerHTML = '';
++        if (scanHistory.length === 0) {
++            historyList.innerHTML = '<div style="color:var(--muted);font-size:0.82rem;padding:0.5rem 0">No scans yet</div>';
++            return;
++        }
++        scanHistory.forEach(({ url, isSafe }) => {
++            const div = document.createElement('div');
++            div.className = 'history-item';
++            div.innerHTML = `<div class="history-dot ${isSafe === true ? 'safe' : isSafe === false ? 'unsafe' : 'unknown'}"></div>
++                             <div class="history-url" title="${url}">${url}</div>`;
++            div.onclick = () => { urlInput.value = url; runScan(); };
++            historyList.appendChild(div);
++        });
++    }
+ 
+-            gameChoices.addEventListener('click', (e) => {
+-                if (!e.target.classList.contains('game-choice-btn')) return;
+-
+-                const selectedUrl = e.target.textContent;
+-                const buttons = gameChoices.querySelectorAll('button');
+-                buttons.forEach(btn => btn.disabled = true);
+-
+-                if (selectedUrl === currentPhishUrl) {
+-                    gameFeedback.textContent = 'Correct! You spotted the phish!';
+-                    gameFeedback.className = 'correct';
+-                    gameScore++;
+-                    e.target.style.backgroundColor = '#10b981';
+-                } else {
+-                    gameFeedback.textContent = `Incorrect. The phishing URL was ${currentPhishUrl}`;
+-                    gameFeedback.className = 'incorrect';
+-                    e.target.style.backgroundColor = '#ef4444';
+-                }
+-                gameScoreEl.textContent = gameScore;
+-                nextRoundBtn.style.display = 'block';
++    document.getElementById('clear-history-btn').onclick = () => {
++        scanHistory = [];
++        localStorage.removeItem('phishguard_history');
++        renderHistory();
++    };
++
++    // ── ABOUT / FEATURE INFO ──
++    async function loadFeatureInfo() {
++        const grid = document.getElementById('feature-grid');
++        if (grid.dataset.loaded) return;
++        try {
++            const res = await fetch('/feature-info');
++            const features = await res.json();
++            grid.innerHTML = '';
++            features.forEach(f => {
++                grid.innerHTML += `
++                <div class="feat-card">
++                    <div class="feat-name">${f.label}</div>
++                    <div class="feat-detail">${f.detail}</div>
++                    <div class="feat-imp">Model weight: ${f.importance}%</div>
++                </div>`;
+             });
+-            
+-            playGameBtn.addEventListener('click', () => { gameModal.classList.add('visible'); gameScore = 0; gameScoreEl.textContent = 0; startNewRound(); });
+-            closeGameBtn.addEventListener('click', () => gameModal.classList.remove('visible'));
+-            nextRoundBtn.addEventListener('click', startNewRound);
++            grid.dataset.loaded = 'true';
++        } catch {
++            grid.innerHTML = '<div style="color:var(--muted)">Could not load feature info.</div>';
++        }
++    }
++
++    // ── GAME ──
++    const gameExamples = [
++        { question: 'Which URL is fake?', safe: 'linkedin.com/login', phish: 'Iinkedin.com/login' },
++        { question: 'Which URL is fake?', safe: 'microsoft.com/account', phish: 'microsfot.com/account' },
++        { question: 'Which URL is fake?', safe: 'apple.com/id/signin', phish: 'apple-id-verify.com/signin' },
++        { question: 'Which URL is fake?', safe: 'paypal.com/signin', phish: 'paypa1.com/signin' },
++        { question: 'Which URL is fake?', safe: 'amazon.com/orders', phish: 'arnazon.com/orders' },
++        { question: 'Which URL is fake?', safe: 'google.com/accounts', phish: 'g00gle-secure.com/accounts' },
++        { question: 'Which URL is fake?', safe: 'bankofamerica.com', phish: 'bank-of-america-secure.com' },
++        { question: 'Which URL is fake?', safe: 'instagram.com/login', phish: 'instagram.login-secure.net' },
++        { question: 'Which URL is fake?', safe: 'netflix.com/login', phish: 'netflixlogin.xyz' },
++        { question: 'Which URL is fake?', safe: 'dropbox.com/login', phish: 'dropbox-secure-login.com' },
++    ];
++
++    const gameModal    = document.getElementById('game-modal');
++    const gameUrlDisp  = document.getElementById('game-url-display');
++    const choiceA      = document.getElementById('choice-a');
++    const choiceB      = document.getElementById('choice-b');
++    const gameFeedback = document.getElementById('game-feedback');
++    const gameScoreEl  = document.getElementById('game-score');
++    const gameRoundEl  = document.getElementById('game-round');
++    const gameStreakEl = document.getElementById('game-streak');
++    const nextRoundBtn = document.getElementById('next-round-btn');
++
++    document.getElementById('play-game-btn').onclick = () => {
++        gameScore = 0; gameRound = 1; gameStreak = 0;
++        updateGameStats();
++        gameModal.classList.add('open');
++        startRound();
++    };
++    document.getElementById('close-game-btn').onclick = () => gameModal.classList.remove('open');
++    nextRoundBtn.onclick = () => { gameRound++; updateGameStats(); startRound(); };
++
++    function updateGameStats() {
++        gameScoreEl.textContent  = gameScore;
++        gameRoundEl.textContent  = gameRound;
++        gameStreakEl.textContent = gameStreak;
++    }
++
++    function startRound() {
++        const ex = gameExamples[Math.floor(Math.random() * gameExamples.length)];
++        currentPhishUrl = ex.phish;
++        const choices = [ex.safe, ex.phish].sort(() => Math.random() - 0.5);
++        gameUrlDisp.textContent = ex.question;
++        choiceA.textContent = choices[0];
++        choiceB.textContent = choices[1];
++        [choiceA, choiceB].forEach(b => { b.disabled = false; b.className = 'game-choice-btn'; });
++        gameFeedback.textContent = '';
++        gameFeedback.style.color = '';
++        nextRoundBtn.style.display = 'none';
++    }
++
++    [choiceA, choiceB].forEach(btn => {
++        btn.addEventListener('click', () => {
++            [choiceA, choiceB].forEach(b => b.disabled = true);
++            const picked = btn.textContent;
++            if (picked === currentPhishUrl) {
++                btn.classList.add('correct-ans');
++                gameFeedback.textContent = '✅ Correct! You spotted the phish!';
++                gameFeedback.style.color = '#3fb950';
++                gameScore++; gameStreak++;
++            } else {
++                btn.classList.add('wrong-ans');
++                // Highlight correct answer
++                [choiceA, choiceB].forEach(b => { if (b.textContent === currentPhishUrl) b.classList.add('correct-ans'); });
++                gameFeedback.textContent = `❌ Incorrect! The phishing URL was "${currentPhishUrl}"`;
++                gameFeedback.style.color = '#f85149';
++                gameStreak = 0;
++            }
++            updateGameStats();
++            nextRoundBtn.style.display = 'block';
+         });
+-    </script>
++    });
++
++    renderHistory();
++});
++</script>
+ </body>
+-</html>
+\ No newline at end of file
++</html>
